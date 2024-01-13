@@ -99,12 +99,12 @@ def _oci_image_impl(ctx):
     if ctx.attr.base and (ctx.attr.os or ctx.attr.architecture or ctx.attr.variant):
         fail("'os', 'architecture' and 'variant' come from the image provided by 'base' and cannot be overridden.")
 
-    util.assert_crane_version_at_least(ctx, "0.15.1", "oci_image")
+    util.assert_crane_version_at_least(ctx, "0.17.0", "oci_image")
 
     crane = ctx.toolchains["@rules_oci//oci:crane_toolchain_type"]
     registry = ctx.toolchains["@rules_oci//oci:registry_toolchain_type"]
     jq = ctx.toolchains["@aspect_bazel_lib//lib:jq_toolchain_type"]
-    
+    coreutils = ctx.toolchains["@aspect_bazel_lib//lib:coreutils_toolchain_type"]
 
     launcher = ctx.actions.declare_file("image_%s.sh" % ctx.label.name)
 
@@ -118,8 +118,10 @@ def _oci_image_impl(ctx):
             "{{registry_launcher_path}}": registry.registry_info.launcher.path,
             "{{crane_path}}": crane.crane_info.binary.path,
             "{{jq_path}}": jq.jqinfo.bin.path,
+            "{{coreutils_path}}": coreutils.coreutils_info.bin.path,
             "{{storage_dir}}": output.path,
             "{{empty_tar}}": ctx.file._empty_tar.path,
+            "{{output}}": output.path,
         },
     )
 
@@ -128,10 +130,11 @@ def _oci_image_impl(ctx):
 
     if ctx.attr.base:
         base = "oci:layout/%s" % ctx.file.base.path
+        # symlink = ctx.actions.declare_symlink("%s/base" % ctx.label.name)
+        # ctx.actions.symlink(output = symlink, target_path = ctx.file.base.path)
         inputs_depsets.append(depset([ctx.file.base]))
 
     args = ctx.actions.args()
-
     args.add_all([
         "mutate",
         base,
@@ -176,9 +179,6 @@ def _oci_image_impl(ctx):
         args.add(ctx.file.annotations.path, format = "--annotations-file=%s")
         inputs_depsets.append(depset([ctx.file.annotations]))
 
-
-    args.add(output.path, format = "--output=%s")
-
     action_env = {}
 
     # Windows: Don't convert arguments like --entrypoint=/some/bin to --entrypoint=C:/msys64/some/bin
@@ -196,7 +196,7 @@ def _oci_image_impl(ctx):
         outputs = [output],
         env = action_env,
         executable = util.maybe_wrap_launcher_for_windows(ctx, launcher),
-        tools = [crane.crane_info.binary, registry.registry_info.launcher, registry.registry_info.registry, jq.jqinfo.bin],
+        tools = [crane.crane_info.binary, registry.registry_info.launcher, registry.registry_info.registry, jq.jqinfo.bin, coreutils.coreutils_info.bin],
         mnemonic = "OCIImage",
         progress_message = "OCI Image %{label}",
     )
@@ -216,5 +216,6 @@ oci_image = rule(
         "@rules_oci//oci:crane_toolchain_type",
         "@rules_oci//oci:registry_toolchain_type",
         "@aspect_bazel_lib//lib:jq_toolchain_type",
+        "@aspect_bazel_lib//lib:coreutils_toolchain_type",
     ],
 )

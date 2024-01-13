@@ -8,18 +8,19 @@ set -o pipefail -o errexit -o nounset
 readonly REGISTRY_LAUNCHER="{{registry_launcher_path}}"
 readonly CRANE="{{crane_path}}"
 readonly JQ="{{jq_path}}"
+readonly COREUTILS="{{coreutils_path}}"
 readonly STORAGE_DIR="{{storage_dir}}"
+readonly OUTPUT="{{output}}"
 
 readonly STDERR=$(mktemp)
 
-silent_on_success() {
+function silent_on_success() {
     stop_registry ${STORAGE_DIR}
     CODE=$?
     if [ "${CODE}" -ne 0 ]; then
         cat "${STDERR}" >&1
     fi
 }
-trap "silent_on_success" EXIT
 
 function get_option() {
     local name=$1
@@ -30,7 +31,6 @@ function get_option() {
         esac
     done
 }
-
 
 function empty_base() {
     local registry=$1
@@ -53,30 +53,45 @@ function empty_base() {
 }
 
 function base_from_layout() {
-    # TODO: https://github.com/google/go-containerregistry/issues/1514
-    local refs=$(mktemp)
-    local output=$(mktemp)
     local oci_layout_path=$1
     local registry=$2
+    local output=$3
+    local blobs="$oci_layout_path/blobs/"
+    local pwd=$(pwd)
+  
+    for p in $(ls -1 -d "$blobs"*/*); do
 
-    "${CRANE}" push "${oci_layout_path}" "${registry}/image:latest" --image-refs "${refs}" > "${output}" 2>&1
+      local relative_path_to_layout=${p#"$oci_layout_path/"}
+      local relative_path_to_layout_dir="$(dirname $relative_path_to_layout)"
+      local hash="$(basename $relative_path_to_layout)"
 
-    if grep -q "MANIFEST_INVALID" "${output}"; then
-    cat >&2 << EOF
+      mkdir -p "$output/$relative_path_to_layout_dir"
 
-zot registry does not support docker manifests. 
+      local relative_to_symlink_target_dir=$($COREUTILS realpath --relative-to="$output/$relative_path_to_layout_dir" "$(dirname $p)")
+      $COREUTILS ln -s "$relative_to_symlink_target_dir/$hash" "$output/$relative_path_to_layout"  >&2
+      # $COREUTILS ln -s "$p" "$pwd/$output/$relp"  >&2
+    done
+    "${CRANE}" push "${oci_layout_path}" "${registry}/image:latest"
+} 
 
-crane registry does support both oci and docker images, but is more memory hungry.
-
-If you want to use the crane registry, remove "zot_version" from "oci_register_toolchains". 
-
-EOF
-
-        exit 1
+function normalize_symlinks() {
+  local output=$1
+  local blobs="$output/blobs/"
+  local pwd=$(pwd)
+  for p in $(ls -1 -d "$blobs"*/*); do
+    if [ -L $p ]; then 
+      local link=$(readlink $p)
+      local link_target=$(cd $(dirname $p) && $pwd/$COREUTILS realpath --no-symlink $link )
+      local relative_link_target="${link_target#"$pwd/"}"
+      $COREUTILS ln -sf ${relative_link_target} $p --verbose
+      # This works!
+      # $COREUTILS ln -sf $(realpath $pwd/$relative_link_target) $p --verbose
     fi
-
-    cat "${refs}"
+  done
 }
+
+# Trap on exit to print error output
+trap "silent_on_success" EXIT
 
 # this will redirect stderr(2) to stderr file.
 {
@@ -84,7 +99,7 @@ source "${REGISTRY_LAUNCHER}"
 REGISTRY=
 REGISTRY=$(start_registry "${STORAGE_DIR}" "${STDERR}")
 
-OUTPUT=""
+
 FIXED_ARGS=()
 ENV_EXPANSIONS=()
 
@@ -92,11 +107,10 @@ for ARG in "$@"; do
     case "$ARG" in
         (oci:registry*) FIXED_ARGS+=("${ARG/oci:registry/$REGISTRY}") ;;
         (oci:empty_base) FIXED_ARGS+=("$(empty_base $REGISTRY $@)") ;;
-        (oci:layout*) FIXED_ARGS+=("$(base_from_layout ${ARG/oci:layout\/} $REGISTRY)") ;;
-        (--output=*) OUTPUT="${ARG#--output=}" ;;
+        (oci:layout*) FIXED_ARGS+=("$(base_from_layout ${ARG/oci:layout\/} $REGISTRY $OUTPUT)") ;;
+        # NB: the '|| [-n $in]' expression is needed to process the final line, in case the input
+        # file doesn't have a trailing newline.
         (--env-file=*)
-          # NB: the '|| [-n $in]' expression is needed to process the final line, in case the input
-          # file doesn't have a trailing newline.
           while IFS= read -r in || [ -n "$in" ]; do
             if [[ "${in}" = *\$* ]]; then
               ENV_EXPANSIONS+=( "${in}" )
@@ -106,14 +120,10 @@ for ARG in "$@"; do
           done <"${ARG#--env-file=}"
           ;;
         (--labels-file=*)
-          # NB: the '|| [-n $in]' expression is needed to process the final line, in case the input
-          # file doesn't have a trailing newline.
           while IFS= read -r in || [ -n "$in" ]; do
             FIXED_ARGS+=("--label=$in")
           done <"${ARG#--labels-file=}"
           ;;
-          # NB: the '|| [-n $in]' expression is needed to process the final line, in case the input
-          # file doesn't have a trailing newline.
         (--annotations-file=*)
           while IFS= read -r in || [ -n "$in" ]; do
             FIXED_ARGS+=("--annotation=$in")
@@ -129,8 +139,8 @@ for ARG in "$@"; do
             FIXED_ARGS+=("--entrypoint=$in")
           done <"${ARG#--entrypoint-file=}"
           ;;
-	(--exposed-ports-file=*)
-	  while IFS= read -r in || [ -n "$in" ]; do
+        (--exposed-ports-file=*)
+          while IFS= read -r in || [ -n "$in" ]; do
             FIXED_ARGS+=("--exposed-ports=$in")
           done <"${ARG#--exposed-ports-file=}"
           ;;
@@ -160,10 +170,14 @@ fi
 
 if [ -n "$OUTPUT" ]; then
     "${CRANE}" pull "${REF}" "./${OUTPUT}" --format=oci --annotate-ref
-    mv "${OUTPUT}/index.json" "${OUTPUT}/temp.json"
+    # normalize_symlinks "${OUTPUT}"
+    ls -l "${OUTPUT}/blobs/sha256"
+    mv "./${OUTPUT}/index.json" "./${OUTPUT}/temp.json"
     "${JQ}" --arg ref "${REF}" '.manifests |= map(select(.annotations["org.opencontainers.image.ref.name"] == $ref)) | del(.manifests[0].annotations)' "${OUTPUT}/temp.json" >  "${OUTPUT}/index.json"
     rm "${OUTPUT}/temp.json"
     "${CRANE}" layout gc "./${OUTPUT}"
+    ls -l "${OUTPUT}/blobs/sha256"
 fi
 
-} 2>> "${STDERR}"
+} 
+# 2>> "${STDERR}"

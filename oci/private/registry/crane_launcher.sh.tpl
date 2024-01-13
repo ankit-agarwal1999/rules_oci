@@ -1,5 +1,5 @@
 readonly SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
-readonly CRANE_REGISTRY_BIN="${SCRIPT_DIR}/{{CRANE}}"
+readonly CRANE_REGISTRY_BIN="/Users/thesayyn/Documents/go-containerregistry/main"
 
 function start_registry() {
     local storage_dir="$1"
@@ -7,8 +7,8 @@ function start_registry() {
     local deadline="${3:-5}"
     local registry_pid="$1/proc.pid"
 
-    mkdir -p "${storage_dir}"
-    "${CRANE_REGISTRY_BIN}" registry serve --disk="${storage_dir}" --address=localhost:0 >> $output 2>&1 &
+    mkdir -p "${storage_dir}/blobs"
+    "${CRANE_REGISTRY_BIN}" registry serve --disk="${storage_dir}/blobs" --address=localhost:0 >> $output 2>&1 &
     echo "$!" > "${registry_pid}"
     
     local timeout=$((SECONDS+${deadline}))
